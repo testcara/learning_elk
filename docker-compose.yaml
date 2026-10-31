@@ -1,0 +1,111 @@
+version: '3.7'
+services:
+  # ======= 1. ES Data + Master节点：存储真实的索引数据、集群主节点 =====
+  es-data:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.17.29
+    container_name: es-data
+    environment:
+      - cluster.name=elk-cluster # ES集群名称，同集群所有节点必须一致
+      - node.name=es-data # 当前节点在集群内的名字
+      - node.master=true # 角色： 数据节点 + master管理节点
+      - node.data=true
+      - discovery.seed_hosts=es-ingest,es-query # 启动时取发现集群里的其他节点
+      - cluster.initial_master_nodes=es-data # 集群首次启动时，选定的初始master
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g # JVM堆内存，最小1G、最大1G；ES堆不要超过31G，本地练习1G足够
+      - bootstrap.memory_lock=true # 锁定内存，防止OS把ES内存swap交换到磁盘（ES性能杀手）
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - esdata:/usr/share/elasticsearch/share/elasticsearch/data
+  
+  # ====== 2. ES Ingest节点 - 写入入口 =====
+  # Logstash/Filebeat推送日志写入这个节点，可以执行ingest预处理pipeline
+  es-ingest:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.17.29
+    container_name: es-ingest
+    ports:
+      - "9203:9200"
+    environment:
+      - cluster.name=elk-cluster
+      - node.name=es-ingest
+      - node.ingest=true
+      - node.master=false
+      - node.data=false
+      - discovery.seed_hosts=es-data
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+      - bootstrap.memory_lock=true
+    ulimits:
+       memlock:
+         soft: -1
+         hard: -1
+    
+  
+  # ==== 3. ES Query - 查询入口 =====
+  # Kibana、Grafana、手动curl查询全部连这个节点，查询流量隔离，不影响写入链路
+  es-query:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.17.29
+    container_name: es-query
+    ports:
+      - "9202:9200"
+    environment:
+      - cluster.name=elk-cluster
+      - node.name=es-query
+      - node.master=false
+      - node.data=false
+      - node.ingest=false
+      - discovery.seed_hosts=es-data
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+      - bootstrap.memory_lock=true
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+
+  # ==== 4. Kibana: ES原生web控制台 ======
+  kibana:
+      image: docker.elastic.co/kibana/kibana:7.17.29
+      container_name: kibana
+      ports:
+        - "5602:5601"
+      environment:
+        - ELASTICSEARCH_HOSTS=http://es-query:9200
+        - xpack.security.encryptionKey=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+        - xpack.reporting.encryptionKey=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+        - xpack.encryptedSavedObjects.encryptionKey=cccccccccccccccccccccccccccccccc
+      depends_on:
+        - es-query
+  
+  # ==== 5. LogStash: 日志清洗转换管道 =====
+  logstash:
+    image: docker.elastic.co/logstash/logstash:7.17.29
+    container_name: logstash
+    ports:
+      - "5043:5043"
+      - "5053:5053"
+    volumes:
+      - ./logstash/pipeline:/usr/share/logstash/pipeline
+    environment:
+      - LS_JAVA_OPTS=-Xms512m -Xmx512m
+      - XPACK.MANAGEMENT.ENABLED=false
+      - XPACK.MONITORING.ENABLED=false
+      - XPACK.LICENSE.MONITORING.ENABLED=false
+    depends_on:
+      - es-ingest # Logstash输出写入到es ingest节点
+  
+  # ===== 6, Grafana: 统一可视化大盘 =====
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+    depends_on:
+      - es-query
+
+# 顶层volumes
+volumes:
+  esdata:
+
